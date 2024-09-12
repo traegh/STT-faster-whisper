@@ -2,6 +2,18 @@
 
 Transcribe.py is a real-time audio transcription tool based on the Faster Whisper 1.0.3 model. It continuously listens for audio input, transcribes it, and outputs the text to both the console and a file.
 
+## ⚠️ Security Warning
+
+**IMPORTANT:** Always exercise caution when downloading and running scripts from the internet, especially those containing `.bat` files or other executable scripts. 
+
+- **Always review the contents** of any `.bat` files or scripts before running them.
+- Malicious actors may attempt to include harmful code in these files.
+- If you're unsure about the contents of a file, **do not run it**.
+- Consider using a trusted antivirus program to scan downloaded files.
+- When in doubt, seek advice from a knowledgeable source or the project maintainers.
+
+Your system's security is your responsibility. Stay vigilant!
+
 ## Features
 
 - Real-time audio transcription
