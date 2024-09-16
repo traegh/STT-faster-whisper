@@ -21,9 +21,11 @@ CONFIG = {
     "FORMAT": pyaudio.paInt16,
     "CHANNELS": 1,
     "RATE": 20000,
-    "RECORD_SECONDS": 12,
     "MICROPHONE_NAME": "Microphone (SM950 Microphone )",
-    "THRESHOLD_DB": 73,
+    "THRESHOLD_DB": 55,
+    "SILENCE_THRESHOLD": 35,  # w dB, dostosuj według potrzeb
+    "MAX_SILENCE_TIME": 3.0,  # maksymalny czas ciszy przed zakończeniem nagrywania (w sekundach)
+    "MAX_RECORDING_TIME": 90,  # maksymalny czas nagrywania (w sekundach)
     "IGNORE_PHRASES_FILE": "ignore_phrases.txt",
     "TRANSCRIPTIONS_FILE": "transcriptions.txt",
     "MODEL_SIZE": "large-v3",
@@ -50,6 +52,7 @@ color_list = [
     Colors.gray
 ]
 
+
 def initialize_model():
     """Inicjalizuje model Whisper."""
     return WhisperModel(
@@ -58,15 +61,18 @@ def initialize_model():
         compute_type=CONFIG["COMPUTE_TYPE"]
     )
 
+
 def display_logo():
     """Wyświetla logotyp w konsoli."""
     os.system('cls' if os.name == 'nt' else 'clear')
     print(Colorate.Horizontal(Colors.rainbow, Center.XCenter(CONFIG["LOGO_TEXT"])))
     print(Colorate.Horizontal(Colors.rainbow, "~ T R A N S K R Y P C J A ~\nZacznij rozmawiać :)\n\n"))
 
+
 def change_console_title(title):
     """Zmienia tytuł okna konsoli."""
     ctypes.windll.kernel32.SetConsoleTitleW(title)
+
 
 def get_system_usage():
     """Pobiera aktualne użycie zasobów systemowych."""
@@ -81,18 +87,26 @@ def get_system_usage():
 
     return gpu_usage, ram_usage
 
-def update_console_title(start_time, chunk_number):
-    """Aktualizuje tytuł okna konsoli w regularnych odstępach czasu."""
+
+def update_console_title(start_time, chunk_number, audio_stream):
+    """Aktualizuje tytuł okna konsoli w regularnych odstępach czasu, dodając informację o poziomie dźwięku."""
     while True:
         elapsed_time = datetime.datetime.now() - start_time
         gpu_usage, ram_usage = get_system_usage()
+
+        # Odczytaj aktualny poziom dźwięku
+        audio_data = audio_stream.read(CONFIG["CHUNK_SIZE"], exception_on_overflow=False)
+        current_db_level = rms_level(audio_data)
+
         title = (
             f"[# {chunk_number}] ElusiveSTT v1.5 | "
             f"Czas: {str(elapsed_time).split('.')[0]} | "
-            f"GPU: {gpu_usage:.1f}% | RAM: {ram_usage:.1f}%"
+            f"GPU: {gpu_usage:.1f}% | RAM: {ram_usage:.1f}% | "
+            f"Poziom dźwięku: {current_db_level:.2f} dB"
         )
         change_console_title(title)
         time.sleep(CONFIG["TITLE_UPDATE_INTERVAL"])
+
 
 def load_ignore_phrases():
     """Wczytuje frazy do ignorowania z pliku tekstowego lub tworzy nowy plik z domyślnymi frazami."""
@@ -106,6 +120,7 @@ def load_ignore_phrases():
         with open(CONFIG["IGNORE_PHRASES_FILE"], "r", encoding="utf-8") as file:
             return [line.strip().lower() for line in file.readlines()]
 
+
 def is_phrase_ignored(text, ignore_phrases):
     """Sprawdza, czy przetranskrybowany tekst powinien być ignorowany."""
     normalized_text = re.sub(r'[^\w\s]', '', text.lower())
@@ -115,11 +130,13 @@ def is_phrase_ignored(text, ignore_phrases):
             return True
     return False
 
+
 def rms_level(data):
     """Oblicza RMS sygnału audio."""
     audio_array = np.frombuffer(data, dtype=np.int16).astype(np.float32)
     rms = np.sqrt(np.mean(np.square(audio_array)))
     return 20 * np.log10(rms) if rms > 0 else -np.inf
+
 
 def transcribe_audio(model, audio_data):
     """Transkrybuje dane audio na tekst przy użyciu modelu Whisper i łączy segmenty."""
@@ -135,10 +152,12 @@ def transcribe_audio(model, audio_data):
     combined_text = " ".join([segment.text.strip() for segment in segments])
     return combined_text
 
+
 def save_transcription(text):
     """Zapisuje transkrypcję do pliku."""
     with open(CONFIG["TRANSCRIPTIONS_FILE"], "a", encoding="utf-8") as file:
         file.write(f"{text}\n")
+
 
 def find_microphone(p):
     """Znajduje indeks wybranego mikrofonu."""
@@ -148,8 +167,9 @@ def find_microphone(p):
             return i
     return None
 
+
 def record_and_transcribe():
-    """Główna funkcja nagrywania i transkrypcji audio."""
+    """Główna funkcja nagrywania i transkrypcji audio z dynamicznym czasem nagrywania."""
     p = pyaudio.PyAudio()
     device_index = find_microphone(p)
 
@@ -173,9 +193,10 @@ def record_and_transcribe():
     start_time = datetime.datetime.now()
     chunk_number = 0
 
+    # Przekazujemy strumień audio do funkcji update_console_title
     threading.Thread(
         target=update_console_title,
-        args=(start_time, chunk_number),
+        args=(start_time, chunk_number, stream),
         daemon=True
     ).start()
 
@@ -184,6 +205,9 @@ def record_and_transcribe():
             chunk_number += 1
             frames = []
             recording = False
+            silence_start = None
+            recording_start = None
+
             print(Colorate.Horizontal(Colors.blue_to_purple, '<<<OCZEKIWANIE NA DŹWIĘK>>>'))
 
             while not recording:
@@ -191,15 +215,26 @@ def record_and_transcribe():
                 if rms_level(data) > CONFIG["THRESHOLD_DB"]:
                     recording = True
                     frames.append(data)
+                    recording_start = time.time()
                     print(Colorate.Horizontal(Colors.red_to_blue, '<<<NAGRYWANIE ROZPOCZĘTE>>>'))
 
-            try:
-                for _ in range(0, int(CONFIG["RATE"] / CONFIG["CHUNK_SIZE"] * CONFIG["RECORD_SECONDS"])):
-                    data = stream.read(CONFIG["CHUNK_SIZE"], exception_on_overflow=False)
-                    frames.append(data)
-            except OSError as e:
-                print(f"Audio stream error: {e}")
-                break
+            while True:
+                data = stream.read(CONFIG["CHUNK_SIZE"], exception_on_overflow=False)
+                frames.append(data)
+
+                current_level = rms_level(data)
+                current_time = time.time()
+
+                if current_level <= CONFIG["SILENCE_THRESHOLD"]:
+                    if silence_start is None:
+                        silence_start = current_time
+                    elif current_time - silence_start > CONFIG["MAX_SILENCE_TIME"]:
+                        break
+                else:
+                    silence_start = None
+
+                if current_time - recording_start > CONFIG["MAX_RECORDING_TIME"]:
+                    break
 
             audio_data = b''.join(frames)
             combined_text = transcribe_audio(model, audio_data)
@@ -208,7 +243,7 @@ def record_and_transcribe():
                 if not is_phrase_ignored(combined_text, ignore_phrases):
                     current_time = datetime.datetime.now()
                     elapsed_seconds = (current_time - start_time).total_seconds()
-                    color = color_list[chunk_number % len(color_list)]  # Wybieranie koloru na podstawie chunk_number
+                    color = color_list[chunk_number % len(color_list)]
 
                     formatted_text = (
                         f"{Colors.yellow}[#{chunk_number} "
@@ -225,6 +260,7 @@ def record_and_transcribe():
         stream.stop_stream()
         stream.close()
         p.terminate()
+
 
 if __name__ == "__main__":
     record_and_transcribe()
