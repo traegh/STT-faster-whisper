@@ -11,6 +11,7 @@ import threading
 import time
 from pystyle import Center, Colors, Colorate
 from faster_whisper import WhisperModel
+import json
 
 # Ustawienie wysokiego priorytetu dla procesu
 psutil.Process(os.getpid()).nice(psutil.HIGH_PRIORITY_CLASS)
@@ -22,7 +23,7 @@ CONFIG = {
     "CHANNELS": 1,
     "RATE": 20000,
     "MICROPHONE_NAME": "Microphone (SM950 Microphone )",
-    "THRESHOLD_DB": 55,
+    "THRESHOLD_DB": 45,
     "SILENCE_THRESHOLD": 35,  # w dB, dostosuj według potrzeb
     "MAX_SILENCE_TIME": 3.0,  # maksymalny czas ciszy przed zakończeniem nagrywania (w sekundach)
     "MAX_RECORDING_TIME": 90,  # maksymalny czas nagrywania (w sekundach)
@@ -88,19 +89,32 @@ def get_system_usage():
     return gpu_usage, ram_usage
 
 
-def update_console_title(start_time, chunk_number, audio_stream):
+def update_console_title(start_time, chunk_number, audio_stream, is_listening, is_processing):
     """Aktualizuje tytuł okna konsoli w regularnych odstępach czasu, dodając informację o poziomie dźwięku."""
+    listening_start_time = None
+    max_listening_time = CONFIG["MAX_RECORDING_TIME"]
+    
     while True:
-        elapsed_time = datetime.datetime.now() - start_time
         gpu_usage, ram_usage = get_system_usage()
 
         # Odczytaj aktualny poziom dźwięku
         audio_data = audio_stream.read(CONFIG["CHUNK_SIZE"], exception_on_overflow=False)
         current_db_level = rms_level(audio_data)
 
+        if is_listening.is_set():
+            if listening_start_time is None:
+                listening_start_time = time.time()
+            elapsed_time = time.time() - listening_start_time
+            time_display = f"{elapsed_time:.2f}s / {max_listening_time}s"
+            status = "[PROCESSING]" if is_processing.is_set() else "[LIVE]"
+        else:
+            listening_start_time = None
+            time_display = f"0.00s / {max_listening_time}s"
+            status = "[WAITING]"
+
         title = (
-            f"[# {chunk_number}] ElusiveSTT v1.5 | "
-            f"Czas: {str(elapsed_time).split('.')[0]} | "
+            f"{status} [# {chunk_number}] ElusiveSTT v1.5 | "
+            f"Czas: {time_display} | "
             f"GPU: {gpu_usage:.1f}% | RAM: {ram_usage:.1f}% | "
             f"Poziom dźwięku: {current_db_level:.2f} dB"
         )
@@ -193,10 +207,13 @@ def record_and_transcribe():
     start_time = datetime.datetime.now()
     chunk_number = 0
 
+    is_listening = threading.Event()
+    is_processing = threading.Event()
+
     # Przekazujemy strumień audio do funkcji update_console_title
     threading.Thread(
         target=update_console_title,
-        args=(start_time, chunk_number, stream),
+        args=(start_time, chunk_number, stream, is_listening, is_processing),
         daemon=True
     ).start()
 
@@ -209,6 +226,8 @@ def record_and_transcribe():
             recording_start = None
 
             print(Colorate.Horizontal(Colors.blue_to_purple, '<<<OCZEKIWANIE NA DŹWIĘK>>>'))
+            is_listening.clear()
+            is_processing.clear()
 
             while not recording:
                 data = stream.read(CONFIG["CHUNK_SIZE"], exception_on_overflow=False)
@@ -216,6 +235,7 @@ def record_and_transcribe():
                     recording = True
                     frames.append(data)
                     recording_start = time.time()
+                    is_listening.set()
                     print(Colorate.Horizontal(Colors.red_to_blue, '<<<NAGRYWANIE ROZPOCZĘTE>>>'))
 
             while True:
@@ -236,23 +256,31 @@ def record_and_transcribe():
                 if current_time - recording_start > CONFIG["MAX_RECORDING_TIME"]:
                     break
 
+            is_listening.clear()
+            is_processing.set()
+            print(Colorate.Horizontal(Colors.yellow_to_red, '<<<PRZETWARZANIE GŁOSU NA TEKST>>>'))
+
+            processing_start_time = time.time()
             audio_data = b''.join(frames)
             combined_text = transcribe_audio(model, audio_data)
+            processing_time = time.time() - processing_start_time
+
+            is_processing.clear()
 
             if combined_text:
                 if not is_phrase_ignored(combined_text, ignore_phrases):
                     current_time = datetime.datetime.now()
-                    elapsed_seconds = (current_time - start_time).total_seconds()
                     color = color_list[chunk_number % len(color_list)]
 
                     formatted_text = (
                         f"{Colors.yellow}[#{chunk_number} "
                         f"{Colors.green}{current_time.strftime('%H:%M:%S')}{Colors.yellow}, "
-                        f"{Colors.cyan}{elapsed_seconds:.2f}s{Colors.yellow}] "
+                        f"{Colors.cyan}{processing_time:.2f}s{Colors.yellow}] "
                         f"{color}{combined_text}{Colors.reset}"
                     )
                     print(formatted_text)
                     save_transcription(combined_text)
+
 
     except KeyboardInterrupt:
         print("Nagrywanie zakończone przez użytkownika.")
@@ -260,7 +288,6 @@ def record_and_transcribe():
         stream.stop_stream()
         stream.close()
         p.terminate()
-
 
 if __name__ == "__main__":
     record_and_transcribe()
